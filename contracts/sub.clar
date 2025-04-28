@@ -17,6 +17,8 @@
 (define-constant ERR_INVALID_TIER_PRICE (err u113))
 (define-constant ERR_TIER_NOT_FOUND (err u114))
 (define-constant ERR_ALREADY_SUBSCRIBED (err u115))
+(define-constant ERR_INVALID_BENEFITS (err u116))
+(define-constant ERR_INVALID_CREATOR_ID (err u117))
 
 ;; Data variables
 (define-data-var contract-owner principal tx-sender)
@@ -73,6 +75,12 @@
 (define-private (blocks-per-month)
   u4320) ;; ~30 days assuming 10 minute blocks
 
+(define-private (is-valid-creator-id (creator-id uint))
+  (and 
+    (> creator-id u0)
+    (<= creator-id (- (var-get next-creator-id) u1))
+  ))
+
 ;; Public functions
 (define-public (register-creator 
     (name (string-utf8 50)) 
@@ -121,6 +129,7 @@
     (asserts! (and (> (len name) u0) (<= (len name) u50)) ERR_INVALID_NAME)
     (asserts! (and (> (len description) u0) (<= (len description) u200)) ERR_INVALID_DESCRIPTION)
     (asserts! (> price-per-month u0) ERR_INVALID_TIER_PRICE)
+    (asserts! (and (> (len benefits) u0) (<= (len benefits) u500)) ERR_INVALID_BENEFITS)
     
     ;; Create new subscription tier
     (map-set creator-tiers tier-key
@@ -143,6 +152,8 @@
 
 (define-public (renew-subscription (creator-id uint) (tier-id uint) (months uint))
   (let (
+    ;; Validate creator-id first
+    (valid-creator-id (asserts! (is-valid-creator-id creator-id) ERR_INVALID_CREATOR_ID))
     (creator (unwrap! (map-get? creators { creator-id: creator-id }) ERR_CREATOR_NOT_FOUND))
     (tier (unwrap! (map-get? creator-tiers { creator-id: creator-id, tier-id: tier-id }) ERR_TIER_NOT_FOUND))
     (subscription-key { creator-id: creator-id, subscriber: tx-sender, tier-id: tier-id })
@@ -192,8 +203,66 @@
         (ok true))
       error (err error))))
 
+(define-public (subscribe (creator-id uint) (tier-id uint) (months uint))
+  (let (
+    ;; Validate creator-id first
+    (valid-creator-id (asserts! (is-valid-creator-id creator-id) ERR_INVALID_CREATOR_ID))
+    (creator (unwrap! (map-get? creators { creator-id: creator-id }) ERR_CREATOR_NOT_FOUND))
+    (tier (unwrap! (map-get? creator-tiers { creator-id: creator-id, tier-id: tier-id }) ERR_TIER_NOT_FOUND))
+    (subscription-key { creator-id: creator-id, subscriber: tx-sender, tier-id: tier-id })
+    (existing-subscription (map-get? subscriptions subscription-key))
+    (price-per-month (get price-per-month tier))
+    (total-amount (* price-per-month months))
+    (platform-fee (calculate-platform-fee total-amount))
+    (creator-amount (- total-amount platform-fee))
+    (blocks-duration (* months (blocks-per-month)))
+    (current-block block-height)
+    (end-block (+ current-block blocks-duration))
+  )
+    (asserts! (> months u0) ERR_INVALID_DURATION)
+    (asserts! (is-none existing-subscription) ERR_ALREADY_SUBSCRIBED)
+    
+    ;; Transfer STX from subscriber to contract
+    (match (stx-transfer? total-amount tx-sender (as-contract tx-sender))
+      success (begin
+        ;; Update creator earnings and subscribers count
+        (map-set creators { creator-id: creator-id }
+          (merge creator { 
+            earnings: (+ (get earnings creator) creator-amount),
+            total-subscribers: (+ (get total-subscribers creator) u1)
+          })
+        )
+        
+        ;; Create subscription record
+        (map-set subscriptions subscription-key
+          { 
+            start-block: current-block,
+            end-block: end-block,
+            amount-paid: total-amount,
+            active: true
+          }
+        )
+        
+        ;; Add platform fee to treasury
+        (var-set platform-treasury (+ (var-get platform-treasury) platform-fee))
+        
+        (print { 
+          event: "subscription-created", 
+          creator-id: creator-id, 
+          subscriber: tx-sender, 
+          tier-id: tier-id,
+          months: months,
+          amount: total-amount,
+          end-block: end-block
+        })
+        
+        (ok true))
+      error (err error))))
+
 (define-public (cancel-subscription (creator-id uint) (tier-id uint))
   (let (
+    ;; Validate creator-id first
+    (valid-creator-id (asserts! (is-valid-creator-id creator-id) ERR_INVALID_CREATOR_ID))
     (subscription-key { creator-id: creator-id, subscriber: tx-sender, tier-id: tier-id })
     (subscription (unwrap! (map-get? subscriptions subscription-key) ERR_SUBSCRIPTION_NOT_FOUND))
   )
@@ -215,6 +284,8 @@
 
 (define-public (claim-earnings (creator-id uint))
   (let (
+    ;; Validate creator-id first
+    (valid-creator-id (asserts! (is-valid-creator-id creator-id) ERR_INVALID_CREATOR_ID))
     (creator-info (unwrap! (map-get? creator-by-address { address: tx-sender }) ERR_CREATOR_NOT_FOUND))
     (creator-id-from-map (get creator-id creator-info))
     (creator (unwrap! (map-get? creators { creator-id: creator-id }) ERR_CREATOR_NOT_FOUND))
