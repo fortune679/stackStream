@@ -141,65 +141,6 @@
     
     (ok tier-id)))
 
-(define-public (subscribe (creator-id uint) (tier-id uint) (months uint))
-  (let (
-    (creator (unwrap! (map-get? creators { creator-id: creator-id }) ERR_CREATOR_NOT_FOUND))
-    (tier (unwrap! (map-get? creator-tiers { creator-id: creator-id, tier-id: tier-id }) ERR_TIER_NOT_FOUND))
-    (subscription-key { creator-id: creator-id, subscriber: tx-sender, tier-id: tier-id })
-    (existing-subscription (map-get? subscriptions subscription-key))
-    (price-per-month (get price-per-month tier))
-    (total-amount (* price-per-month months))
-    (platform-fee (calculate-platform-fee total-amount))
-    (creator-amount (- total-amount platform-fee))
-    (blocks-duration (* months (blocks-per-month)))
-    (current-block block-height)
-  )
-    (asserts! (> months u0) ERR_INVALID_DURATION)
-    
-    ;; Check if already subscribed and subscription is active
-    (when (is-some existing-subscription)
-      (let ((sub (unwrap-panic existing-subscription)))
-        (asserts! (not (get active sub)) ERR_ALREADY_SUBSCRIBED)
-      )
-    )
-    
-    ;; Transfer STX from subscriber to contract
-    (match (stx-transfer? (+ total-amount platform-fee) tx-sender (as-contract tx-sender))
-      success (begin
-        ;; Update creator earnings
-        (map-set creators { creator-id: creator-id }
-          (merge creator { 
-            earnings: (+ (get earnings creator) creator-amount),
-            total-subscribers: (+ (get total-subscribers creator) u1)
-          })
-        )
-        
-        ;; Create subscription record
-        (map-set subscriptions subscription-key
-          { 
-            start-block: current-block,
-            end-block: (+ current-block blocks-duration),
-            amount-paid: total-amount,
-            active: true
-          }
-        )
-        
-        ;; Add platform fee to treasury
-        (var-set platform-treasury (+ (var-get platform-treasury) platform-fee))
-        
-        (print { 
-          event: "subscription-created", 
-          creator-id: creator-id, 
-          subscriber: tx-sender, 
-          tier-id: tier-id,
-          months: months,
-          amount: total-amount,
-          platform-fee: platform-fee
-        })
-        
-        (ok true))
-      error (err error))))
-
 (define-public (renew-subscription (creator-id uint) (tier-id uint) (months uint))
   (let (
     (creator (unwrap! (map-get? creators { creator-id: creator-id }) ERR_CREATOR_NOT_FOUND))
